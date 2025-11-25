@@ -9,7 +9,7 @@ import pytz # Pour la gestion des fuseaux horaires
 st.set_page_config(page_title="Agenda Marées V2", page_icon="🌊", layout="centered")
 
 # Clé API par défaut (laisser vide pour forcer l'utilisateur à la mettre)
-DEFAULT_API_KEY = "" 
+DEFAULT_API_KEY = ${{ secrets.WORLDTIDES_API_KEY }}
 
 # Base de données des lieux (Lat/Lon)
 PORTS_DB = {
