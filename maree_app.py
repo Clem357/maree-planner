@@ -17,6 +17,7 @@ PORTS_DB = {
     "Saint-Malo": {"lat": 48.6481, "lon": -2.0075},
     "Brest":      {"lat": 48.3904, "lon": -4.4861},
     "Roscoff":    {"lat": 48.7167, "lon": -3.9833},
+    "Concarneau": {"lat": 47.867, "lon": -3.917},
     "Lorient":    {"lat": 47.7483, "lon": -3.3700},
     "--- ATLANTIQUE ---": None,
     "La Rochelle":{"lat": 46.1603, "lon": -1.1511},
