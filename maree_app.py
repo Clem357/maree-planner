@@ -1,199 +1,246 @@
 import streamlit as st
 import requests
-import pandas as pd
-from datetime import datetime, timedelta, timezone
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from ics import Calendar, Event
-import pytz # Pour la gestion des fuseaux horaires
+import pandas as pd
+import time
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Agenda Marées V2", page_icon="🌊", layout="centered")
-
-# Clé API par défaut (laisser vide pour forcer l'utilisateur à la mettre)
-DEFAULT_API_KEY = ""
-
-# Base de données des lieux (Lat/Lon)
-PORTS_DB = {
-    "--- BRETAGNE ---": None,
-    "Saint-Malo": {"lat": 48.6481, "lon": -2.0075},
-    "Brest":      {"lat": 48.3904, "lon": -4.4861},
-    "Roscoff":    {"lat": 48.7167, "lon": -3.9833},
-    "Concarneau": {"lat": 47.867, "lon": -3.917},
-    "Lorient":    {"lat": 47.7483, "lon": -3.3700},
-    "--- ATLANTIQUE ---": None,
-    "La Rochelle":{"lat": 46.1603, "lon": -1.1511},
-    "Arcachon":   {"lat": 44.6600, "lon": -1.1600},
-    "Biarritz":   {"lat": 43.4832, "lon": -1.5586},
+# --- CONFIGURATION DES PORTS (IDs maree.info) ---
+# Liste élargie aux villes majeures
+PORTS = {
     "--- MANCHE / NORD ---": None,
-    "Le Havre":   {"lat": 49.4944, "lon": 0.1078},
-    "Dieppe":     {"lat": 49.9230, "lon": 1.0770},
-    "Calais":     {"lat": 50.9513, "lon": 1.8587},
+    "Dunkerque": "2",
+    "Calais": "4",
+    "Boulogne-sur-Mer": "8",
+    "Dieppe": "14",
+    "Fécamp": "16",
+    "Le Havre": "18",
+    "Honfleur": "20",
+    "Ouistreham": "24",
+    "Cherbourg": "12",
+    "Granville": "30",
+    "Saint-Malo": "36",
+    
+    "--- BRETAGNE NORD/OUEST ---": None,
+    "Perros-Guirec": "42",
+    "Roscoff": "46",
+    "Brest": "82",
+    "Camaret": "84",
+    "Douarnenez": "88",
+    
+    "--- BRETAGNE SUD ---": None,
+    "Audierne": "90",
+    "Concarneau": "96",
+    "Lorient": "104",
+    "Quiberon (Port Maria)": "110",
+    "Vannes": "116",
+    "Le Croisic": "118",
+    "Saint-Nazaire": "119",
+    
+    "--- ATLANTIQUE ---": None,
+    "Pornic": "120",
+    "Noirmoutier": "122",
+    "Les Sables-d'Olonne": "121",
+    "La Rochelle": "125",
+    "Rochefort": "128",
+    "Royan": "132",
+    "Arcachon": "136",
+    "Cap Ferret": "135",
+    "Bayonne / Boucau": "142",
+    "Biarritz": "144",
+    "Saint-Jean-de-Luz": "145",
+    
     "--- MÉDITERRANÉE ---": None,
-    "Marseille":  {"lat": 43.2965, "lon": 5.3698},
-    "Nice":       {"lat": 43.7102, "lon": 7.2620},
-    "--- OUTRE-MER (Test Timezone) ---": None,
-    "Pointe-à-Pitre (Guadeloupe)": {"lat": 16.2333, "lon": -61.5167},
+    "Port-Vendres": "156",
+    "Sète": "160",
+    "Marseille": "166",
+    "Toulon": "168",
+    "Nice": "174",
+    "Ajaccio": "178",
+    "Bastia": "180"
 }
 
-# --- FONCTIONS ---
-
-def get_worldtides_data(lat, lon, start_date, end_date, api_key, tz_name):
+# --- FONCTION DE SCRAPING ---
+def scrape_maree_info(port_id, start_date, end_date):
     """
-    Récupère les marées via WorldTides et convertit dans le bon fuseau horaire.
+    Récupère les marées jour par jour en lisant le HTML de maree.info
     """
-    # WorldTides attend un timestamp (Epoch)
-    # On combine la date choisie avec minuit pour avoir le début de journée
-    start_dt = datetime.combine(start_date, datetime.min.time())
-    start_ts = int(start_dt.timestamp())
+    data_list = []
     
-    # Calcul de la durée en jours
-    days = (end_date - start_date).days + 1
+    # Calcul du nombre de jours
+    delta = (end_date - start_date).days + 1
     
-    url = "https://www.worldtides.info/api/v3"
-    params = {
-        "extremes": "",       # On veut les pleines/basses mers
-        "lat": lat,
-        "lon": lon,
-        "start": start_ts,
-        "days": days,
-        "key": api_key,
-        "datum": "LAT"        # Lowest Astronomical Tide (référence cartes)
+    # Barre de progression dans l'UI
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Headers pour simuler un vrai navigateur (évite certains blocages)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
+
+    for i in range(delta):
+        current_date = start_date + timedelta(days=i)
         
-        if 'error' in data:
-            st.error(f"Erreur API : {data['error']}")
-            return []
-
-        processed_tides = []
-        target_tz = pytz.timezone(tz_name)
+        # Mise à jour progression
+        progress_val = (i + 1) / delta
+        progress_bar.progress(progress_val)
+        status_text.text(f"Lecture des données pour le {current_date.strftime('%d/%m/%Y')}...")
         
-        if 'extremes' in data:
-            for t in data['extremes']:
-                # 1. Lire le timestamp UTC fourni par l'API
-                dt_utc = datetime.fromtimestamp(t['dt'], tz=timezone.utc)
+        # Construction URL : http://maree.info/{ID}?d=YYYYMMDD
+        date_str = current_date.strftime("%Y%m%d")
+        url = f"http://maree.info/{port_id}?d={date_str}"
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # 2. Convertir vers le fuseau horaire choisi par l'utilisateur
-                dt_local = dt_utc.astimezone(target_tz)
+                # Le tableau principal a souvent l'ID 'MareeJours'
+                table = soup.find('table', id='MareeJours')
                 
-                tide_type = "Pleine Mer" if t['type'] == "High" else "Basse Mer"
-                
-                processed_tides.append({
-                    "Date": dt_local.strftime("%Y-%m-%d"),
-                    "Heure": dt_local.strftime("%H:%M"),
-                    "Type": tide_type,
-                    "Hauteur (m)": round(t['height'], 2),
-                    "timestamp_obj": dt_local # Gardé pour la création ICS
-                })
-                
-        return processed_tides
+                if table:
+                    # On parcourt les lignes du tableau
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        cells = row.find_all('td')
+                        # Une ligne de donnée valide a généralement au moins 3 cellules : Heure, Hauteur, Coeff
+                        if len(cells) >= 2:
+                            # 1. Heure
+                            time_txt = cells[0].get_text(strip=True).replace('h', ':')
+                            
+                            # 2. Hauteur
+                            height_txt = cells[1].get_text(strip=True)
+                            
+                            # 3. Coefficient (parfois vide)
+                            coeff_txt = ""
+                            if len(cells) > 2:
+                                coeff_txt = cells[2].get_text(strip=True)
+                            
+                            # Nettoyage et Validation
+                            if ':' in time_txt:
+                                try:
+                                    # Création objet date complet
+                                    time_obj = datetime.strptime(time_txt, "%H:%M").time()
+                                    full_dt = datetime.combine(current_date, time_obj)
+                                    
+                                    # Détection type (Simplifiée : on enregistre tout, l'utilisateur triera)
+                                    # Sur maree.info, les pleines mers sont souvent en gras <b>, on peut tenter :
+                                    is_bold = row.find('b') is not None
+                                    tide_type = "Pleine Mer" if is_bold else "Basse Mer"
+                                    # Si la détection gras échoue, on met générique
+                                    if not is_bold and "MareeJours_" in str(row): 
+                                        # Parfois le site utilise des classes CSS
+                                        pass 
 
-    except Exception as e:
-        st.error(f"Erreur de connexion ou clé invalide : {e}")
-        return []
+                                    data_list.append({
+                                        "Date": current_date.strftime("%Y-%m-%d"),
+                                        "Heure": time_txt,
+                                        "Hauteur": height_txt,
+                                        "Coeff": coeff_txt,
+                                        "Type (Est.)": tide_type, 
+                                        "datetime": full_dt # Pour l'ICS
+                                    })
+                                except ValueError:
+                                    continue
+            
+            # Petite pause pour être poli avec le serveur
+            time.sleep(0.1)
+            
+        except Exception as e:
+            print(f"Erreur pour {date_str}: {e}")
+            continue
 
-def create_ics_file(tides_data, location_name):
+    status_text.empty()
+    progress_bar.empty()
+    return data_list
+
+def generate_ics(tides_data, location_name):
     c = Calendar()
     for tide in tides_data:
         e = Event()
-        e.name = f"{tide['Type']} ({tide['Hauteur (m)']}m)"
-        e.begin = tide['timestamp_obj']
-        e.duration = timedelta(minutes=20)
+        
+        # Construction du titre de l'événement
+        # Modification demandée : coeff précisé explicitement dans le titre
+        if tide['Coeff']:
+            # Format avec Coefficient (ex: Pleine Mer - Coeff: 95 - 4.50m)
+            title = f"{tide['Type (Est.)']} - Coeff: {tide['Coeff']} - {tide['Hauteur']}"
+        else:
+            # Format sans Coefficient (ex: Basse Mer - 1.20m)
+            title = f"{tide['Type (Est.)']} - {tide['Hauteur']}"
+        
+        e.name = title
+        e.begin = tide['datetime']
+        e.duration = timedelta(minutes=30) # Durée arbitraire de l'événement
         e.location = location_name
-        e.description = f"Hauteur : {tide['Hauteur (m)']}m\nLieu : {location_name}"
+        e.description = f"Heure : {tide['Heure']}\nHauteur : {tide['Hauteur']}\nCoefficient : {tide['Coeff']}\nSource: maree.info"
+        
         c.events.add(e)
     return str(c)
 
-# --- INTERFACE ---
+# --- INTERFACE UTILISATEUR ---
+st.set_page_config(page_title="Marées Scraping", page_icon="🦀")
 
-st.title("📅 Générateur de Marées pour Agenda")
-st.markdown("Récupérez les horaires de marées et ajoutez-les à votre calendrier (Google/Apple/Outlook).")
+st.title("🦀 Marées de France (Scraping)")
+st.markdown("""
+Générez votre calendrier des marées pour vos vacances.
+*Source des données : maree.info*
+""")
 
+# Sidebar
 with st.sidebar:
-    st.header("1. Configuration")
+    st.header("1. Lieu")
+    # Filtrer les séparateurs (None) pour la logique, mais garder dans la liste pour l'affichage
+    display_ports = list(PORTS.keys())
+    selected_port_name = st.selectbox("Choisir un port", display_ports)
     
-    # Clé API
-    api_key = st.text_input("Clé API WorldTides", value=DEFAULT_API_KEY, type="password", help="Inscrivez-vous sur worldtides.info pour avoir une clé gratuite.")
-    
-    # Sélection du port
-    # On filtre les clés qui sont None (les séparateurs) pour la liste de choix
-    valid_ports = [p for p in PORTS_DB.keys() if PORTS_DB[p] is not None]
-    # On affiche tout dans la selectbox, mais on gérera la sélection
-    selected_item = st.selectbox("Choisir un lieu", list(PORTS_DB.keys()))
-    
-    # Dates
-    st.subheader("2. Dates du séjour")
+    st.header("2. Dates")
+    # Astuce UX : st.date_input permet de naviguer par année en cliquant sur l'année en haut du calendrier
     today = datetime.now()
     dates = st.date_input(
-        "Sélectionnez l'intervalle",
-        (today, today + timedelta(days=3)),
-        format="DD/MM/YYYY"
+        "Période du séjour",
+        (today, today + timedelta(days=7)),
+        format="DD/MM/YYYY",
+        help="Cliquez sur le mois ou l'année en haut du calendrier pour changer rapidement."
     )
-    
-    # Fuseau Horaire
-    st.subheader("3. Fuseau Horaire")
-    # Liste des timezones courantes
-    common_timezones = ['Europe/Paris', 'Atlantic/Canary', 'America/Guadeloupe', 'Indian/Reunion', 'Pacific/Noumea']
-    all_timezones = pytz.all_timezones
-    
-    # Par défaut Europe/Paris (index 0 de common_timezones si on le met en premier)
-    selected_tz = st.selectbox("Fuseau horaire local", common_timezones + all_timezones, index=0)
 
-# LOGIQUE PRINCIPALE
-if selected_item and PORTS_DB[selected_item] is None:
-    st.warning("Veuillez sélectionner une ville (pas un séparateur).")
+# Corps principal
+if PORTS[selected_port_name] is None:
+    st.warning("Veuillez sélectionner une ville dans la liste (pas une région).")
 
-elif st.button("Rechercher les marées 🔎", type="primary"):
-    if not api_key:
-        st.error("Il faut une clé API WorldTides pour continuer.")
-    elif len(dates) != 2:
-        st.error("Veuillez sélectionner une date de DEBUT et une date de FIN.")
+elif st.button("Lancer la récupération (Scraping)"):
+    if len(dates) != 2:
+        st.error("Il faut une date de début et de fin.")
     else:
-        start_date, end_date = dates
-        coords = PORTS_DB[selected_item]
+        start, end = dates
         
-        with st.spinner("Interrogation des données satellites..."):
-            # Appel API
-            data = get_worldtides_data(
-                coords['lat'], 
-                coords['lon'], 
-                start_date, 
-                end_date, 
-                api_key, 
-                selected_tz
-            )
-        
-        if data:
-            # --- APERÇU (PREVIEW) ---
-            st.success(f"{len(data)} marées trouvées pour {selected_item} !")
-            
-            # Création d'un DataFrame pour l'affichage propre
-            df = pd.DataFrame(data)
-            # On retire la colonne technique 'timestamp_obj' pour l'affichage
-            display_df = df[["Date", "Heure", "Type", "Hauteur (m)"]]
-            
-            st.subheader("📋 Aperçu des résultats")
-            
-            # Affichage en tableau interactif (l'utilisateur peut trier)
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-            
-            # --- TÉLÉCHARGEMENT ---
-            ics_content = create_ics_file(data, selected_item)
-            
-            st.download_button(
-                label="📥 Télécharger pour mon Agenda (.ics)",
-                data=ics_content,
-                file_name=f"marees_{selected_item}_{start_date}_{end_date}.ics",
-                mime="text/calendar"
-            )
-            
+        # Vérification sécurité anti-abus
+        if (end - start).days > 60:
+            st.error("⚠️ Pour éviter de bloquer le site, veuillez demander moins de 60 jours à la fois.")
         else:
-            st.warning("Aucune donnée trouvée (vérifiez vos dates ou votre crédit API).")
-
-# Petit footer explicatif
-st.markdown("---")
-st.caption("Données fournies par WorldTides API. Usage personnel uniquement.")
-
+            st.info(f"Connexion à maree.info pour récupérer les données de **{selected_port_name}**...")
+            
+            # Lancement du scraping
+            port_id = PORTS[selected_port_name]
+            results = scrape_maree_info(port_id, start, end)
+            
+            if results:
+                st.success(f"Terminé ! {len(results)} horaires récupérés.")
+                
+                # Aperçu Tableau
+                df = pd.DataFrame(results)
+                # On cache la colonne datetime technique pour l'affichage
+                st.dataframe(df.drop(columns=["datetime"]), use_container_width=True, hide_index=True)
+                
+                # Génération ICS
+                ics_file = generate_ics(results, selected_port_name)
+                
+                st.download_button(
+                    label="📥 Télécharger mon Calendrier (.ics)",
+                    data=ics_file,
+                    file_name=f"marees_{selected_port_name}_{start}_{end}.ics",
+                    mime="text/calendar"
+                )
+            else:
+                st.error("Aucune donnée trouvée. Le site a peut-être changé sa structure ou le port n'a pas de données pour cette date.")
