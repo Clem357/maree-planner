@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from ics import Calendar, Event
+import pytz # <-- NÉCESSAIRE pour la gestion correcte de l'heure d'été/hiver (Europe/Paris)
 
 # --- CONFIGURATION & DONNÉES ---
 st.set_page_config(page_title="Calendrier Marées (Stable)", page_icon="🌊", layout="centered")
@@ -50,11 +51,15 @@ PORTS_DB = {
     "Ajaccio": {"lat": 41.9213, "lon": 8.7360},
 }
 
+# Définition du fuseau horaire pour la France (gère l'heure d'été/hiver)
+PARIS_TZ = pytz.timezone('Europe/Paris')
+
 # --- FONCTIONS ---
 
 def get_worldtides_data(lat, lon, start_date, end_date, api_key):
     """
     Récupère les marées via l'API WorldTides (stable et rapide).
+    La requête de coefficient est retirée pour améliorer la stabilité.
     """
     if not api_key:
         return []
@@ -76,19 +81,10 @@ def get_worldtides_data(lat, lon, start_date, end_date, api_key):
         "timezone": "UTC"
     }
     
-    # URL pour les coefficients (nécessite une requête séparée sur WorldTides)
-    url_coeff = "https://www.worldtides.info/api/v3"
-    params_coeff = {
-        "property": "Coefficient",
-        "lat": lat,
-        "lon": lon,
-        "start": start_ts,
-        "days": days,
-        "key": api_key,
-    }
+    # --- LA REQUÊTE POUR LES COEFFICIENTS A ÉTÉ RETIRÉE ICI ---
     
     try:
-        # 1. Requête pour les extrêmes
+        # 1. Requête pour les extrêmes (Heure, Type, Hauteur)
         response_extremes = requests.get(url_extremes, params=params_extremes)
         response_extremes.raise_for_status()
         data_extremes = response_extremes.json()
@@ -97,15 +93,9 @@ def get_worldtides_data(lat, lon, start_date, end_date, api_key):
             st.error(f"Erreur API (Extrêmes) : {data_extremes['error']}. Vérifiez votre clé ou votre quota.")
             return []
 
-        # 2. Requête pour les coefficients
-        response_coeff = requests.get(url_coeff, params=params_coeff)
-        response_coeff.raise_for_status()
-        coeff_data = response_coeff.json()
-        
-        coeff_map = {int(p['dt']): p['value'] for p in coeff_data.get('predictions', [])}
-        
         processed_tides = []
         
+        # Récupération des données d'extrêmes
         extremes_data = data_extremes.get('extremes', {}).get('heights') or data_extremes.get('extremes', [])
         
         if not extremes_data:
@@ -114,20 +104,18 @@ def get_worldtides_data(lat, lon, start_date, end_date, api_key):
         for t in extremes_data:
             dt_utc = datetime.fromtimestamp(t['dt'], tz=timezone.utc)
             
-            # Conversion simple en heure de Paris (UTC+1 ou UTC+2)
-            dt_local = dt_utc.astimezone(timezone(timedelta(hours=1)))
+            # Conversion en heure locale de Paris (gère l'heure d'été/hiver grâce à pytz)
+            dt_local = dt_utc.astimezone(PARIS_TZ)
             
             tide_type = "Pleine Mer" if t['type'] == "High" else "Basse Mer"
             
-            # Récupération du coefficient basé sur le timestamp
-            coeff = coeff_map.get(t['dt'])
+            # Les coefficients ne sont plus récupérés
             
             processed_tides.append({
                 "Date": dt_local.strftime("%Y-%m-%d"),
                 "Heure": dt_local.strftime("%H:%M"),
                 "Type": tide_type,
                 "Hauteur (m)": round(t['height'], 2),
-                "Coeff": int(round(coeff)) if coeff else '', # Arrondi du coefficient
                 "timestamp_obj": dt_local 
             })
                 
@@ -135,7 +123,7 @@ def get_worldtides_data(lat, lon, start_date, end_date, api_key):
 
     except Exception as e:
         # Erreur générale, souvent due à une mauvaise connexion ou timeout
-        st.error(f"Erreur de connexion : {e}. Le problème peut venir de la limite des 100 tokens ou d'une erreur réseau.")
+        st.error(f"Erreur de connexion : {e}. Le problème peut venir de la limite des 100 tokens, d'une erreur réseau, ou d'une clé API invalide/expirée.")
         return []
 
 def generate_ics(tides_data, location_name):
@@ -143,15 +131,23 @@ def generate_ics(tides_data, location_name):
     for tide in tides_data:
         e = Event()
         
-        # Construction du titre : Pleine Mer - Coeff: 95 - 4.50m
-        coeff_part = f" - Coeff: {tide['Coeff']}" if tide['Coeff'] else ""
-        title = f"{tide['Type']}{coeff_part} - {tide['Hauteur (m)']:.2f}m"
+        # Construction du titre simple : Pleine Mer - 4.50m (Coefficient retiré)
+        title = f"{tide['Type']} - {tide['Hauteur (m)']:.2f}m"
         
         e.name = title
         e.begin = tide['timestamp_obj']
         e.duration = timedelta(minutes=30)
         e.location = location_name
-        e.description = f"Type: {tide['Type']}\nHauteur: {tide['Hauteur (m)']:.2f}m\nCoefficient: {tide['Coeff']}\nSource: WorldTides API"
+        
+        # Description détaillée (avec toutes les informations disponibles)
+        e.description = (
+            f"Lieu: {location_name}\n"
+            f"Date: {tide['Date']}\n"
+            f"Heure: {tide['Heure']} ({PARIS_TZ.zone})\n"
+            f"Type de marée: {tide['Type']}\n"
+            f"Hauteur: {tide['Hauteur (m)']:.2f}m\n"
+            f"Source: WorldTides API"
+        )
         
         c.events.add(e)
     return str(c)
@@ -218,7 +214,8 @@ elif st.button("Générer l'Agenda", type="primary"):
             
             # --- APERÇU ---
             df = pd.DataFrame(data)
-            display_df = df[["Date", "Heure", "Type", "Hauteur (m)", "Coeff"]]
+            # Retrait de "Coeff" de l'affichage
+            display_df = df[["Date", "Heure", "Type", "Hauteur (m)"]]
             
             st.subheader("📋 Aperçu des résultats")
             st.dataframe(display_df, use_container_width=True, hide_index=True)
