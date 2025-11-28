@@ -5,242 +5,278 @@ from datetime import datetime, timedelta
 from ics import Calendar, Event
 import pandas as pd
 import time
+import re
 
-# --- CONFIGURATION DES PORTS (IDs maree.info) ---
-# Liste élargie aux villes majeures
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Calendrier Marées V3", page_icon="🌊")
+
+# Mapping : Nom Affiché -> Slug URL sur horaire-maree.fr
+# Le slug est la partie de l'URL après /maree/ (ex: http://www.horaire-maree.fr/maree/Saint-Malo/)
 PORTS = {
-    "--- MANCHE / NORD ---": None,
-    "Dunkerque": "2",
-    "Calais": "4",
-    "Boulogne-sur-Mer": "8",
-    "Dieppe": "14",
-    "Fécamp": "16",
-    "Le Havre": "18",
-    "Honfleur": "20",
-    "Ouistreham": "24",
-    "Cherbourg": "12",
-    "Granville": "30",
-    "Saint-Malo": "36",
+    "--- MANCHE EST ---": None,
+    "Dunkerque": "Dunkerque",
+    "Calais": "Calais",
+    "Boulogne-sur-Mer": "Boulogne-sur-Mer",
+    "Le Touquet": "Le-Touquet-Paris-Plage",
+    "Dieppe": "Dieppe",
+    "Fécamp": "Fecamp",
+    "Le Havre": "Le-Havre",
+    "Honfleur": "Honfleur",
+    "Deauville / Trouville": "Trouville-sur-Mer",
+    "Ouistreham": "Ouistreham",
     
-    "--- BRETAGNE NORD/OUEST ---": None,
-    "Perros-Guirec": "42",
-    "Roscoff": "46",
-    "Brest": "82",
-    "Camaret": "84",
-    "Douarnenez": "88",
+    "--- MANCHE OUEST ---": None,
+    "Cherbourg": "Cherbourg",
+    "Granville": "Granville",
+    "Saint-Malo": "Saint-Malo",
+    "Dinard": "Dinard",
+    "Erquy": "Erquy",
+    "Paimpol": "Paimpol",
+    "Perros-Guirec": "Perros-Guirec",
+    "Roscoff": "Roscoff",
     
-    "--- BRETAGNE SUD ---": None,
-    "Audierne": "90",
-    "Concarneau": "96",
-    "Lorient": "104",
-    "Quiberon (Port Maria)": "110",
-    "Vannes": "116",
-    "Le Croisic": "118",
-    "Saint-Nazaire": "119",
+    "--- ATLANTIQUE BRETAGNE ---": None,
+    "Brest": "Brest",
+    "Camaret-sur-Mer": "Camaret-sur-Mer",
+    "Douarnenez": "Douarnenez",
+    "Audierne": "Audierne",
+    "Concarneau": "Concarneau",
+    "Lorient": "Lorient",
+    "Quiberon": "Quiberon",
+    "Vannes": "Vannes",
     
-    "--- ATLANTIQUE ---": None,
-    "Pornic": "120",
-    "Noirmoutier": "122",
-    "Les Sables-d'Olonne": "121",
-    "La Rochelle": "125",
-    "Rochefort": "128",
-    "Royan": "132",
-    "Arcachon": "136",
-    "Cap Ferret": "135",
-    "Bayonne / Boucau": "142",
-    "Biarritz": "144",
-    "Saint-Jean-de-Luz": "145",
-    
+    "--- ATLANTIQUE SUD ---": None,
+    "Le Croisic": "Le-Croisic",
+    "Saint-Nazaire": "Saint-Nazaire",
+    "Pornic": "Pornic",
+    "Noirmoutier": "Noirmoutier-en-l-Ile",
+    "Les Sables-d'Olonne": "Les-Sables-d-Olonne",
+    "La Rochelle": "La-Rochelle",
+    "Ile de Ré (Saint-Martin)": "Saint-Martin-de-Re",
+    "Ile d'Oléron (Saint-Denis)": "Saint-Denis-d-Oleron",
+    "Royan": "Royan",
+    "Arcachon": "Arcachon",
+    "Cap Ferret": "Le-Cap-Ferret",
+    "Biarritz": "Biarritz",
+    "Saint-Jean-de-Luz": "Saint-Jean-de-Luz",
+    "Hendaye": "Hendaye",
+
     "--- MÉDITERRANÉE ---": None,
-    "Port-Vendres": "156",
-    "Sète": "160",
-    "Marseille": "166",
-    "Toulon": "168",
-    "Nice": "174",
-    "Ajaccio": "178",
-    "Bastia": "180"
+    "Marseille": "Marseille",
+    "Toulon": "Toulon",
+    "Nice": "Nice",
+    "Sète": "Sete",
+    "Port-Vendres": "Port-Vendres",
+    "Ajaccio": "Ajaccio",
+    "Bastia": "Bastia"
 }
 
-# --- FONCTION DE SCRAPING ---
-def scrape_maree_info(port_id, start_date, end_date):
+def clean_text(text):
+    """Nettoie les textes HTML (enlève les espaces insécables, etc.)"""
+    return text.replace('\xa0', '').strip()
+
+def scrape_horaire_maree_fr(city_slug, start_date, end_date):
     """
-    Récupère les marées jour par jour en lisant le HTML de maree.info
+    Scrape le site horaire-maree.fr
+    Ce site affiche souvent toute l'année ou le mois en cours.
+    On va récupérer la page et filtrer les dates.
     """
     data_list = []
     
-    # Calcul du nombre de jours
-    delta = (end_date - start_date).days + 1
-    
-    # Barre de progression dans l'UI
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Headers pour simuler un vrai navigateur (évite certains blocages)
+    # User-Agent "Vrai navigateur" pour éviter le blocage
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Referer": "https://www.google.com/"
     }
-
-    for i in range(delta):
-        current_date = start_date + timedelta(days=i)
+    
+    url = f"https://www.horaire-maree.fr/maree/{city_slug}/"
+    
+    try:
+        # 1. Requête
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status() # Lève une erreur si 404/500
         
-        # Mise à jour progression
-        progress_val = (i + 1) / delta
-        progress_bar.progress(progress_val)
-        status_text.text(f"Lecture des données pour le {current_date.strftime('%d/%m/%Y')}...")
+        soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Construction URL : http://maree.info/{ID}?d=YYYYMMDD
-        date_str = current_date.strftime("%Y%m%d")
-        url = f"http://maree.info/{port_id}?d={date_str}"
+        # 2. Parsing
+        # Le site utilise des tableaux avec la classe "tableau_maree" ou une structure par grille.
+        # Structure courante : Une grille par jour ou un gros tableau.
         
-        try:
-            response = requests.get(url, headers=headers, timeout=5)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # Le tableau principal a souvent l'ID 'MareeJours'
-                table = soup.find('table', id='MareeJours')
-                
-                if table:
-                    # On parcourt les lignes du tableau
-                    rows = table.find_all('tr')
-                    for row in rows:
-                        cells = row.find_all('td')
-                        # Une ligne de donnée valide a généralement au moins 3 cellules : Heure, Hauteur, Coeff
-                        if len(cells) >= 2:
-                            # 1. Heure
-                            time_txt = cells[0].get_text(strip=True).replace('h', ':')
-                            
-                            # 2. Hauteur
-                            height_txt = cells[1].get_text(strip=True)
-                            
-                            # 3. Coefficient (parfois vide)
-                            coeff_txt = ""
-                            if len(cells) > 2:
-                                coeff_txt = cells[2].get_text(strip=True)
-                            
-                            # Nettoyage et Validation
-                            if ':' in time_txt:
-                                try:
-                                    # Création objet date complet
-                                    time_obj = datetime.strptime(time_txt, "%H:%M").time()
-                                    full_dt = datetime.combine(current_date, time_obj)
-                                    
-                                    # Détection type (Simplifiée : on enregistre tout, l'utilisateur triera)
-                                    # Sur maree.info, les pleines mers sont souvent en gras <b>, on peut tenter :
-                                    is_bold = row.find('b') is not None
-                                    tide_type = "Pleine Mer" if is_bold else "Basse Mer"
-                                    # Si la détection gras échoue, on met générique
-                                    if not is_bold and "MareeJours_" in str(row): 
-                                        # Parfois le site utilise des classes CSS
-                                        pass 
-
-                                    data_list.append({
-                                        "Date": current_date.strftime("%Y-%m-%d"),
-                                        "Heure": time_txt,
-                                        "Hauteur": height_txt,
-                                        "Coeff": coeff_txt,
-                                        "Type (Est.)": tide_type, 
-                                        "datetime": full_dt # Pour l'ICS
-                                    })
-                                except ValueError:
-                                    continue
+        # On cherche le tableau des marées (souvent id="maree_jours" ou class="tableau_maree")
+        # Sur horaire-maree.fr, c'est souvent un tableau général
+        tables = soup.find_all('table')
+        
+        found_data = False
+        
+        for table in tables:
+            # On cherche un tableau qui contient des dates
+            rows = table.find_all('tr')
+            current_parsing_date = None
             
-            # Petite pause pour être poli avec le serveur
-            time.sleep(0.1)
-            
-        except Exception as e:
-            print(f"Erreur pour {date_str}: {e}")
-            continue
+            for row in rows:
+                text_row = row.get_text(" ", strip=True)
+                
+                # --- A. DÉTECTION DE LA DATE ---
+                # Les lignes de date ressemblent à "Dimanche 1 Janvier 2024"
+                # On essaie de parser la date si on trouve un jour de la semaine
+                days_fr = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+                
+                # Vérifions si la ligne commence par un jour
+                for d in days_fr:
+                    if d in text_row:
+                        # Nettoyage pour essayer de trouver la date
+                        # Ex: "Mardi 23 Juillet 2024"
+                        try:
+                            # Regex pour extraire jour mois année
+                            match = re.search(r'(\d{1,2})\s+([a-zA-Zéû]+)\s+(\d{4})', text_row)
+                            if match:
+                                day_num = match.group(1)
+                                month_str = match.group(2).lower()
+                                year_num = match.group(3)
+                                
+                                # Mapping mois FR -> Num
+                                mois_map = {
+                                    'janvier': 1, 'février': 2, 'fevrier': 2, 'mars': 3, 'avril': 4, 
+                                    'mai': 5, 'juin': 6, 'juillet': 7, 'août': 8, 'aout': 8, 
+                                    'septembre': 9, 'octobre': 10, 'novembre': 11, 'décembre': 12, 'decembre': 12
+                                }
+                                
+                                if month_str in mois_map:
+                                    current_parsing_date = datetime(int(year_num), mois_map[month_str], int(day_num)).date()
+                        except:
+                            pass
+                        break # On a trouvé le jour, on passe à la suite de la ligne
+                
+                # --- B. DÉTECTION DES HEURES (Si on a une date valide) ---
+                if current_parsing_date and start_date <= current_parsing_date <= end_date:
+                    found_data = True
+                    # Analyser les cellules : Heure | Hauteur | Coeff
+                    # Sur ce site, c'est souvent : "Pleine mer" "04:12" "5.45m" "95"
+                    cells = row.find_all('td')
+                    
+                    # Logique floue pour trouver les données dans la ligne
+                    # On cherche un pattern HH:MM
+                    
+                    # On parcourt les cellules pour trouver des heures
+                    row_content = [clean_text(c.get_text()) for c in cells]
+                    
+                    if len(row_content) >= 3:
+                        # Est-ce une ligne de données ?
+                        # Type (PM/BM) ?
+                        tide_type = "?"
+                        if "Pleine mer" in text_row or "Pleine Mer" in text_row:
+                            tide_type = "Pleine Mer"
+                        elif "Basse mer" in text_row or "Basse Mer" in text_row:
+                            tide_type = "Basse Mer"
+                        else:
+                            continue # Pas une ligne de marée intéressante
+                            
+                        # Extraction Heure (Format XXhXX ou XX:XX)
+                        time_val = None
+                        height_val = ""
+                        coeff_val = ""
+                        
+                        for cell in row_content:
+                            # Chercher l'heure
+                            if re.match(r'^\d{1,2}[:h]\d{2}$', cell):
+                                time_val = cell.replace('h', ':')
+                            # Chercher la hauteur (contient 'm')
+                            elif 'm' in cell and re.search(r'\d', cell):
+                                height_val = cell
+                            # Chercher le coeff (nombre entier entre 20 et 120)
+                            elif cell.isdigit() and 20 < int(cell) < 130:
+                                coeff_val = cell
+                        
+                        if time_val:
+                            full_dt = datetime.combine(current_parsing_date, datetime.strptime(time_val, "%H:%M").time())
+                            
+                            data_list.append({
+                                "datetime": full_dt,
+                                "Type": tide_type,
+                                "Heure": time_val,
+                                "Hauteur": height_val,
+                                "Coeff": coeff_val
+                            })
+                            
+        return data_list
 
-    status_text.empty()
-    progress_bar.empty()
-    return data_list
+    except Exception as e:
+        st.error(f"Erreur de connexion au site : {e}")
+        return []
 
 def generate_ics(tides_data, location_name):
     c = Calendar()
     for tide in tides_data:
         e = Event()
         
-        # Construction du titre de l'événement
-        # Modification demandée : coeff précisé explicitement dans le titre
-        if tide['Coeff']:
-            # Format avec Coefficient (ex: Pleine Mer - Coeff: 95 - 4.50m)
-            title = f"{tide['Type (Est.)']} - Coeff: {tide['Coeff']} - {tide['Hauteur']}"
-        else:
-            # Format sans Coefficient (ex: Basse Mer - 1.20m)
-            title = f"{tide['Type (Est.)']} - {tide['Hauteur']}"
+        # Construction du titre
+        # Ex: Pleine Mer - Coeff: 95 - 5.40m
+        coeff_part = f" - Coeff: {tide['Coeff']}" if tide['Coeff'] else ""
+        title = f"{tide['Type']}{coeff_part} - {tide['Hauteur']}"
         
         e.name = title
         e.begin = tide['datetime']
-        e.duration = timedelta(minutes=30) # Durée arbitraire de l'événement
+        e.duration = timedelta(minutes=30)
         e.location = location_name
-        e.description = f"Heure : {tide['Heure']}\nHauteur : {tide['Hauteur']}\nCoefficient : {tide['Coeff']}\nSource: maree.info"
+        e.description = f"Type: {tide['Type']}\nHeure: {tide['Heure']}\nHauteur: {tide['Hauteur']}\nCoeff: {tide['Coeff']}\nSource: horaire-maree.fr"
         
         c.events.add(e)
     return str(c)
 
-# --- INTERFACE UTILISATEUR ---
-st.set_page_config(page_title="Marées Scraping", page_icon="🦀")
+# --- UI ---
 
-st.title("🦀 Marées de France (Scraping)")
-st.markdown("""
-Générez votre calendrier des marées pour vos vacances.
-*Source des données : maree.info*
-""")
+st.title("⚓ Calendrier Marées (Fiable)")
+st.info("Source : horaire-maree.fr (Compatible coefficients & villes françaises)")
 
-# Sidebar
 with st.sidebar:
-    st.header("1. Lieu")
-    # Filtrer les séparateurs (None) pour la logique, mais garder dans la liste pour l'affichage
-    display_ports = list(PORTS.keys())
-    selected_port_name = st.selectbox("Choisir un port", display_ports)
+    st.header("Lieu")
+    # Liste filtrée
+    port_list = list(PORTS.keys())
+    selected_port_key = st.selectbox("Choisir une ville", port_list)
     
-    st.header("2. Dates")
-    # Astuce UX : st.date_input permet de naviguer par année en cliquant sur l'année en haut du calendrier
+    st.header("Dates")
     today = datetime.now()
     dates = st.date_input(
-        "Période du séjour",
+        "Sélectionnez la période",
         (today, today + timedelta(days=7)),
-        format="DD/MM/YYYY",
-        help="Cliquez sur le mois ou l'année en haut du calendrier pour changer rapidement."
+        format="DD/MM/YYYY"
     )
 
-# Corps principal
-if PORTS[selected_port_name] is None:
-    st.warning("Veuillez sélectionner une ville dans la liste (pas une région).")
-
-elif st.button("Lancer la récupération (Scraping)"):
+if PORTS[selected_port_key] is None:
+    st.warning("Choisissez une ville, pas une région.")
+    
+elif st.button("Récupérer les horaires"):
     if len(dates) != 2:
-        st.error("Il faut une date de début et de fin.")
+        st.error("Sélectionnez une date de début et de fin.")
     else:
         start, end = dates
+        slug = PORTS[selected_port_key]
         
-        # Vérification sécurité anti-abus
-        if (end - start).days > 60:
-            st.error("⚠️ Pour éviter de bloquer le site, veuillez demander moins de 60 jours à la fois.")
-        else:
-            st.info(f"Connexion à maree.info pour récupérer les données de **{selected_port_name}**...")
-            
-            # Lancement du scraping
-            port_id = PORTS[selected_port_name]
-            results = scrape_maree_info(port_id, start, end)
+        with st.spinner(f"Récupération des données pour {selected_port_key}..."):
+            # Appel Scraping
+            results = scrape_horaire_maree_fr(slug, start, end)
             
             if results:
-                st.success(f"Terminé ! {len(results)} horaires récupérés.")
+                st.success(f"{len(results)} marées trouvées !")
                 
-                # Aperçu Tableau
+                # Affichage Tableau
+                # On formate un peu pour que ce soit joli
                 df = pd.DataFrame(results)
-                # On cache la colonne datetime technique pour l'affichage
-                st.dataframe(df.drop(columns=["datetime"]), use_container_width=True, hide_index=True)
+                display_df = df[["datetime", "Type", "Hauteur", "Coeff"]].copy()
+                display_df["Date"] = display_df["datetime"].dt.strftime("%d/%m/%Y")
+                display_df["Heure"] = display_df["datetime"].dt.strftime("%H:%M")
+                display_df = display_df[["Date", "Heure", "Type", "Hauteur", "Coeff"]]
+                
+                st.table(display_df)
                 
                 # Génération ICS
-                ics_file = generate_ics(results, selected_port_name)
-                
+                ics_data = generate_ics(results, selected_port_key)
                 st.download_button(
-                    label="📥 Télécharger mon Calendrier (.ics)",
-                    data=ics_file,
-                    file_name=f"marees_{selected_port_name}_{start}_{end}.ics",
+                    label="📅 Télécharger pour Agenda (.ics)",
+                    data=ics_data,
+                    file_name=f"marees_{slug}.ics",
                     mime="text/calendar"
                 )
             else:
-                st.error("Aucune donnée trouvée. Le site a peut-être changé sa structure ou le port n'a pas de données pour cette date.")
+                st.error("Aucune donnée trouvée. Vérifiez que la période n'est pas trop lointaine (le site affiche souvent max 1 an).")
