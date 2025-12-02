@@ -3,13 +3,11 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from ics import Calendar, Event
-import pytz # <-- NÉCESSAIRE pour la gestion correcte de l'heure d'été/hiver (Europe/Paris)
+import pytz # Pour la gestion des fuseaux horaires
 
-# --- CONFIGURATION & DONNÉES ---
-st.set_page_config(page_title="Calendrier Marées (Stable)", page_icon="🌊", layout="centered")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Agenda Marées V2", page_icon="🌊", layout="centered")
 
-# LECTURE AUTOMATIQUE DE LA CLÉ DE L'API DEPUIS LE COFFRE-FORT DE STREAMLIT (secrets.toml)
-# La clé doit être enregistrée sous la variable 'WORLDTIDES_KEY'
 try:
     API_KEY = st.secrets["WORLDTIDES_KEY"]
 except KeyError:
@@ -19,217 +17,189 @@ except KeyError:
         "dans le fichier secrets.toml de Streamlit sous la variable WORLDTIDES_KEY."
     )
 
-
-# Base de données des lieux (Lat/Lon pour l'API)
-# Liste complète des ports français majeurs
+# Base de données des lieux (Lat/Lon)
 PORTS_DB = {
-    "--- MANCHE EST ---": None,
-    "Dunkerque": {"lat": 51.0504, "lon": 2.3768},
-    "Calais": {"lat": 50.9513, "lon": 1.8587},
-    "Boulogne-sur-Mer": {"lat": 50.7259, "lon": 1.5976},
-    "Le Havre": {"lat": 49.4944, "lon": 0.1078},
-    "Dieppe": {"lat": 49.9230, "lon": 1.0770},
-    "Cherbourg": {"lat": 49.6500, "lon": -1.6200},
-    
     "--- BRETAGNE ---": None,
     "Saint-Malo": {"lat": 48.6481, "lon": -2.0075},
-    "Brest": {"lat": 48.3904, "lon": -4.4861},
-    "Roscoff": {"lat": 48.7167, "lon": -3.9833},
-    "Lorient": {"lat": 47.7483, "lon": -3.3700},
-    "Vannes": {"lat": 47.6580, "lon": -2.7600},
-    
-    "--- ATLANTIQUE SUD ---": None,
-    "La Rochelle": {"lat": 46.1603, "lon": -1.1511},
-    "Les Sables-d'Olonne": {"lat": 46.4950, "lon": -1.7850},
-    "Arcachon": {"lat": 44.6600, "lon": -1.1600},
-    "Biarritz": {"lat": 43.4832, "lon": -1.5586},
-    "Saint-Jean-de-Luz": {"lat": 43.3892, "lon": -1.6669},
-
+    "Brest":      {"lat": 48.3904, "lon": -4.4861},
+    "Roscoff":    {"lat": 48.7167, "lon": -3.9833},
+    "Concarneau": {"lat": 47.8667, "lon": -3.9167},
+    "Lorient":    {"lat": 47.7483, "lon": -3.3700},
+    "--- ATLANTIQUE ---": None,
+    "La Rochelle":{"lat": 46.1603, "lon": -1.1511},
+    "Arcachon":   {"lat": 44.6600, "lon": -1.1600},
+    "Biarritz":   {"lat": 43.4832, "lon": -1.5586},
+    "--- MANCHE / NORD ---": None,
+    "Le Havre":   {"lat": 49.4944, "lon": 0.1078},
+    "Dieppe":     {"lat": 49.9230, "lon": 1.0770},
+    "Calais":     {"lat": 50.9513, "lon": 1.8587},
     "--- MÉDITERRANÉE ---": None,
-    "Marseille": {"lat": 43.2965, "lon": 5.3698},
-    "Nice": {"lat": 43.7102, "lon": 7.2620},
-    "Ajaccio": {"lat": 41.9213, "lon": 8.7360},
+    "Marseille":  {"lat": 43.2965, "lon": 5.3698},
+    "Nice":       {"lat": 43.7102, "lon": 7.2620},
+    "--- OUTRE-MER (Test Timezone) ---": None,
+    "Pointe-à-Pitre (Guadeloupe)": {"lat": 16.2333, "lon": -61.5167},
 }
-
-# Définition du fuseau horaire pour la France (gère l'heure d'été/hiver)
-PARIS_TZ = pytz.timezone('Europe/Paris')
 
 # --- FONCTIONS ---
 
-def get_worldtides_data(lat, lon, start_date, end_date, api_key):
+def get_worldtides_data(lat, lon, start_date, end_date, api_key, tz_name):
     """
-    Récupère les marées via l'API WorldTides (stable et rapide).
-    La requête de coefficient est retirée pour améliorer la stabilité.
+    Récupère les marées via WorldTides et convertit dans le bon fuseau horaire.
     """
-    if not api_key:
-        return []
-
+    # WorldTides attend un timestamp (Epoch)
+    # On combine la date choisie avec minuit pour avoir le début de journée
     start_dt = datetime.combine(start_date, datetime.min.time())
     start_ts = int(start_dt.timestamp())
+    
+    # Calcul de la durée en jours
     days = (end_date - start_date).days + 1
     
-    # URL de base pour les extrêmes (marées hautes/basses)
-    url_extremes = "https://www.worldtides.info/api/v3"
-    params_extremes = {
-        "extremes": "",
+    url = "https://www.worldtides.info/api/v3"
+    params = {
+        "extremes": "",       # On veut les pleines/basses mers
         "lat": lat,
         "lon": lon,
         "start": start_ts,
         "days": days,
         "key": api_key,
-        "datum": "LAT",
-        "timezone": "UTC"
+        "datum": "LAT"        # Lowest Astronomical Tide (référence cartes)
     }
     
-    # --- LA REQUÊTE POUR LES COEFFICIENTS A ÉTÉ RETIRÉE ICI ---
-    
     try:
-        # 1. Requête pour les extrêmes (Heure, Type, Hauteur)
-        response_extremes = requests.get(url_extremes, params=params_extremes)
-        response_extremes.raise_for_status()
-        data_extremes = response_extremes.json()
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
         
-        if 'error' in data_extremes:
-            st.error(f"Erreur API (Extrêmes) : {data_extremes['error']}. Vérifiez votre clé ou votre quota.")
+        if 'error' in data:
+            st.error(f"Erreur API : {data['error']}")
             return []
 
         processed_tides = []
+        target_tz = pytz.timezone(tz_name)
         
-        # Récupération des données d'extrêmes
-        extremes_data = data_extremes.get('extremes', {}).get('heights') or data_extremes.get('extremes', [])
-        
-        if not extremes_data:
-            return [] 
-
-        for t in extremes_data:
-            dt_utc = datetime.fromtimestamp(t['dt'], tz=timezone.utc)
-            
-            # Conversion en heure locale de Paris (gère l'heure d'été/hiver grâce à pytz)
-            dt_local = dt_utc.astimezone(PARIS_TZ)
-            
-            tide_type = "Pleine Mer" if t['type'] == "High" else "Basse Mer"
-            
-            # Les coefficients ne sont plus récupérés
-            
-            processed_tides.append({
-                "Date": dt_local.strftime("%Y-%m-%d"),
-                "Heure": dt_local.strftime("%H:%M"),
-                "Type": tide_type,
-                "Hauteur (m)": round(t['height'], 2),
-                "timestamp_obj": dt_local 
-            })
+        if 'extremes' in data:
+            for t in data['extremes']:
+                # 1. Lire le timestamp UTC fourni par l'API
+                dt_utc = datetime.fromtimestamp(t['dt'], tz=timezone.utc)
+                
+                # 2. Convertir vers le fuseau horaire choisi par l'utilisateur
+                dt_local = dt_utc.astimezone(target_tz)
+                
+                tide_type = "Pleine Mer" if t['type'] == "High" else "Basse Mer"
+                
+                processed_tides.append({
+                    "Date": dt_local.strftime("%Y-%m-%d"),
+                    "Heure": dt_local.strftime("%H:%M"),
+                    "Type": tide_type,
+                    "Hauteur (m)": round(t['height'], 2),
+                    "timestamp_obj": dt_local # Gardé pour la création ICS
+                })
                 
         return processed_tides
 
     except Exception as e:
-        # Erreur générale, souvent due à une mauvaise connexion ou timeout
-        st.error(f"Erreur de connexion : {e}. Le problème peut venir de la limite des 100 tokens, d'une erreur réseau, ou d'une clé API invalide/expirée.")
+        st.error(f"Erreur de connexion ou clé invalide : {e}")
         return []
 
-def generate_ics(tides_data, location_name):
+def create_ics_file(tides_data, location_name):
     c = Calendar()
     for tide in tides_data:
         e = Event()
-        
-        # Construction du titre simple : Pleine Mer - 4.50m (Coefficient retiré)
-        title = f"{tide['Type']} - {tide['Hauteur (m)']:.2f}m"
-        
-        e.name = title
+        e.name = f"{tide['Type']} ({tide['Hauteur (m)']}m)"
         e.begin = tide['timestamp_obj']
-        e.duration = timedelta(minutes=30)
+        e.duration = timedelta(minutes=20)
         e.location = location_name
-        
-        # Description détaillée (avec toutes les informations disponibles)
-        e.description = (
-            f"Lieu: {location_name}\n"
-            f"Date: {tide['Date']}\n"
-            f"Heure: {tide['Heure']} ({PARIS_TZ.zone})\n"
-            f"Type de marée: {tide['Type']}\n"
-            f"Hauteur: {tide['Hauteur (m)']:.2f}m\n"
-            f"Source: WorldTides API"
-        )
-        
+        e.description = f"Hauteur : {tide['Hauteur (m)']}m\nLieu : {location_name}"
         c.events.add(e)
     return str(c)
 
-# --- UI ---
+# --- INTERFACE ---
 
-st.title("✅ Calendrier Marées (Stable API)")
-st.markdown("Ceci est la version la plus stable pour Streamlit Cloud. La clé API est lue depuis `st.secrets`.")
-
-# Suppression du champ de saisie de la clé dans la barre latérale
+st.title("📅 Générateur de Marées pour Agenda")
+st.markdown("Récupérez les horaires de marées et ajoutez-les à votre calendrier (Google/Apple/Outlook).")
 
 with st.sidebar:
-    st.header("1. Clé API")
-    if API_KEY:
-        st.success("Clé API WORLDTIDES_KEY chargée.")
-    else:
-        # Affiche le message d'erreur si la clé n'est pas trouvée (bloc try/except en haut)
-        pass 
+    st.header("1. Configuration")
     
-    st.header("2. Lieu")
-    port_list = list(PORTS_DB.keys())
-    selected_item = st.selectbox("Choisir un lieu", port_list)
+    # Clé API
+    api_key = st.text_input("Clé API WorldTides", value=DEFAULT_API_KEY, type="password", help="Inscrivez-vous sur worldtides.info pour avoir une clé gratuite.")
     
-    st.header("3. Dates")
-    today = datetime.now().date()
+    # Sélection du port
+    # On filtre les clés qui sont None (les séparateurs) pour la liste de choix
+    valid_ports = [p for p in PORTS_DB.keys() if PORTS_DB[p] is not None]
+    # On affiche tout dans la selectbox, mais on gérera la sélection
+    selected_item = st.selectbox("Choisir un lieu", list(PORTS_DB.keys()))
+    
+    # Dates
+    st.subheader("2. Dates du séjour")
+    today = datetime.now()
     dates = st.date_input(
         "Sélectionnez l'intervalle",
-        (today, today + timedelta(days=7)),
-        format="DD/MM/YYYY",
-        # Permet de choisir les mois et années facilement (comportement natif)
-        help="Cliquez sur l'année ou le mois pour naviguer rapidement."
+        (today, today + timedelta(days=3)),
+        format="DD/MM/YYYY"
     )
+    
+    # Fuseau Horaire
+    st.subheader("3. Fuseau Horaire")
+    # Liste des timezones courantes
+    common_timezones = ['Europe/Paris', 'Atlantic/Canary', 'America/Guadeloupe', 'Indian/Reunion', 'Pacific/Noumea']
+    all_timezones = pytz.all_timezones
+    
+    # Par défaut Europe/Paris (index 0 de common_timezones si on le met en premier)
+    selected_tz = st.selectbox("Fuseau horaire local", common_timezones + all_timezones, index=0)
 
 # LOGIQUE PRINCIPALE
 if selected_item and PORTS_DB[selected_item] is None:
     st.warning("Veuillez sélectionner une ville (pas un séparateur).")
 
-elif st.button("Générer l'Agenda", type="primary"):
-    if not API_KEY:
-        # L'erreur a déjà été affichée en haut, on bloque juste l'exécution
-        st.error("🛑 Impossible de lancer la requête : Clé API non trouvée.")
+elif st.button("Rechercher les marées 🔎", type="primary"):
+    if not api_key:
+        st.error("Il faut une clé API WorldTides pour continuer.")
     elif len(dates) != 2:
-        st.error("Sélectionnez une date de début et de fin.")
+        st.error("Veuillez sélectionner une date de DEBUT et une date de FIN.")
     else:
         start_date, end_date = dates
-        
-        if (end_date - start_date).days > 30:
-            st.warning("Pour les tests et le quota gratuit, demandez moins de 30 jours à la fois.")
-
         coords = PORTS_DB[selected_item]
         
-        with st.spinner("Interrogation de l'API WorldTides..."):
+        with st.spinner("Interrogation des données satellites..."):
             # Appel API
             data = get_worldtides_data(
                 coords['lat'], 
                 coords['lon'], 
                 start_date, 
                 end_date, 
-                API_KEY # Utilisation de la variable globale API_KEY lue par st.secrets
+                api_key, 
+                selected_tz
             )
         
         if data:
+            # --- APERÇU (PREVIEW) ---
             st.success(f"{len(data)} marées trouvées pour {selected_item} !")
             
-            # --- APERÇU ---
+            # Création d'un DataFrame pour l'affichage propre
             df = pd.DataFrame(data)
-            # Retrait de "Coeff" de l'affichage
+            # On retire la colonne technique 'timestamp_obj' pour l'affichage
             display_df = df[["Date", "Heure", "Type", "Hauteur (m)"]]
             
             st.subheader("📋 Aperçu des résultats")
+            
+            # Affichage en tableau interactif (l'utilisateur peut trier)
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             
             # --- TÉLÉCHARGEMENT ---
-            ics_content = generate_ics(data, selected_item)
+            ics_content = create_ics_file(data, selected_item)
             
             st.download_button(
-                label="📥 Télécharger .ics",
+                label="📥 Télécharger pour mon Agenda (.ics)",
                 data=ics_content,
-                file_name=f"maree_{selected_item}_{start_date}_{end_date}.ics",
+                file_name=f"marees_{selected_item}_{start_date}_{end_date}.ics",
                 mime="text/calendar"
             )
             
         else:
-            # L'erreur spécifique a déjà été affichée par la fonction get_worldtides_data
-            pass
+            st.warning("Aucune donnée trouvée (vérifiez vos dates ou votre crédit API).")
+
+# Petit footer explicatif
+st.markdown("---")
+st.caption("Données fournies par WorldTides API. Usage personnel uniquement.")
+
