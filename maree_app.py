@@ -122,7 +122,7 @@ with st.sidebar:
     st.header("1. Configuration")
     
     # Clé API
-    api_key = st.text_input("Clé API WorldTides", value=DEFAULT_API_KEY, type="password", help="Inscrivez-vous sur worldtides.info pour avoir une clé gratuite.")
+    api_key = API_KEY
     
     # Sélection du port
     # On filtre les clés qui sont None (les séparateurs) pour la liste de choix
